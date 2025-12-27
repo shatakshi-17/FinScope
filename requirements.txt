@@ -1,0 +1,53 @@
+# FinScope - Financial Document Analysis Platform
+# Python Dependencies
+# ==============================================================================
+
+# Core Framework & Utilities
+# ------------------------------------------------------------------------------
+python-dotenv>=1.0.0          # Environment variable management (.env files)
+requests>=2.31.0              # HTTP client for API calls and web scraping
+
+# Database
+# ------------------------------------------------------------------------------
+pymongo>=4.6.0                 # MongoDB driver for database operations
+# Note: pymongo includes bson and gridfs as dependencies
+
+# AI & Machine Learning
+# ------------------------------------------------------------------------------
+google-generativeai>=0.3.0     # Google Gemini API client for document analysis
+tenacity>=8.2.0                # Retry logic with exponential backoff for API calls
+
+# Data Processing & Analysis
+# ------------------------------------------------------------------------------
+pandas>=2.0.0                  # Data manipulation and analysis (company lists)
+
+# Text Processing & Fuzzy Matching
+# ------------------------------------------------------------------------------
+rapidfuzz>=3.0.0               # Fast fuzzy string matching (company name suggestions)
+thefuzz>=0.19.0                # Fuzzy string matching (news article deduplication)
+python-dateutil>=2.8.0         # Date parsing and manipulation
+
+# Web Scraping & RSS Feeds
+# ------------------------------------------------------------------------------
+feedparser>=6.0.0              # RSS/Atom feed parsing (Google News)
+
+# SEC EDGAR Integration
+# ------------------------------------------------------------------------------
+edgartools>=1.0.0              # SEC EDGAR filing retrieval and analysis
+# Alternative: edgar (older package, used as fallback if edgartools unavailable)
+
+# Document Processing (Optional - Required for PDF uploads)
+# ------------------------------------------------------------------------------
+pymupdf4llm>=0.0.9             # PDF to Markdown conversion (preserves tables/formatting)
+pymupdf>=1.23.0                # PDF processing library (dependency of pymupdf4llm)
+# Note: These are only required if you plan to upload PDF documents
+
+# ==============================================================================
+# Installation Notes:
+# ==============================================================================
+# 1. Core installation: pip install -r requirements.txt
+# 2. For PDF support: The pymupdf packages are included but only needed for PDF uploads
+# 3. SEC EDGAR: edgartools is preferred, but edgar can be used as fallback
+# 4. Environment variables required:
+#    - GOOGLE_API_KEY: Your Google Gemini API key
+#    - MONGODB_URI: Your MongoDB connection string
