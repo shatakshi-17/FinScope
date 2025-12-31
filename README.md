@@ -116,12 +116,6 @@ FinScope is a comprehensive financial intelligence platform that leverages Googl
 
 ---
 
-## Screenshots
-
-<div align="center">
-
----
-
 ## Installation
 
 ### Prerequisites
