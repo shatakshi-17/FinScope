@@ -204,3 +204,120 @@ def get_chat_details(chat_id: str) -> Optional[Dict]:
         # Re-raise with context for debugging
         raise Exception(f"Failed to retrieve chat details: {e}") from e
 
+
+def get_recent_history(query: Optional[str] = None) -> List[Dict]:
+    """
+    Retrieves recent/archived chat history formatted for API consumption.
+    Includes full chat messages for each conversation.
+    
+    This function retrieves archived conversations and formats them with
+    full message history for frontend consumption.
+    
+    Args:
+        query: Optional search string to filter by company name (case-insensitive)
+    
+    Returns:
+        List[Dict]: List of chat objects, each containing:
+            - company_name: Company name from metadata
+            - ticker: Ticker symbol (if available, otherwise None)
+            - type: Either 'sec' or 'upload' (lowercase)
+            - timestamp: Creation timestamp (ISO format string)
+            - session_id: The chat_id (conversation ID)
+            - metadata: Full metadata object for additional information
+            - chats: Array of message objects [{ role, content, timestamp }, ...]
+    
+    Results are sorted by created_at descending (newest first).
+    
+    Raises:
+        Exception: If database query fails
+    """
+    try:
+        # Get archived chats using existing function (for preview data)
+        archived_chats = get_archived_chats(query)
+        
+        # Transform to API format with full message history
+        formatted_chats = []
+        for chat in archived_chats:
+            chat_id = chat.get('chat_id')
+            if not chat_id:
+                continue
+            
+            # Get full conversation details including messages
+            conversation = get_chat_details(chat_id)
+            if not conversation:
+                continue
+            
+            metadata = conversation.get('metadata', {})
+            workflow_type = conversation.get('workflow_type', 'UNKNOWN')
+            
+            # Normalize type to lowercase
+            chat_type = 'sec' if workflow_type.lower() == 'sec' else 'upload'
+            
+            # Extract company name
+            company_name = metadata.get('company', 'Unknown Company')
+            
+            # Extract ticker (optional field)
+            ticker = metadata.get('ticker', None)
+            
+            # Get timestamp
+            created_at = conversation.get('created_at')
+            if created_at:
+                # Convert datetime to ISO format string if it's a datetime object
+                if isinstance(created_at, datetime):
+                    timestamp = created_at.isoformat()
+                else:
+                    timestamp = str(created_at)
+            else:
+                timestamp = None
+            
+            # Get messages array (rename from 'messages' to 'chats' as requested)
+            messages = conversation.get('messages', [])
+            
+            # Build formatted chat object
+            formatted_chat = {
+                'company_name': company_name,
+                'ticker': ticker,
+                'type': chat_type,
+                'timestamp': timestamp,
+                'session_id': chat_id,
+                'metadata': metadata,
+                'chats': messages  # Full array of message objects
+            }
+            
+            formatted_chats.append(formatted_chat)
+        
+        return formatted_chats
+    
+    except Exception as e:
+        # Re-raise with context for debugging
+        raise Exception(f"Failed to retrieve recent history: {e}") from e
+
+
+def delete_chat(chat_id: str) -> bool:
+    """
+    Permanently deletes a chat conversation from the database.
+    
+    Args:
+        chat_id: The conversation ID to delete
+    
+    Returns:
+        bool: True if conversation was deleted, False if not found
+    
+    Raises:
+        ValueError: If chat_id format is invalid
+        Exception: If database operation fails
+    """
+    # Validate input
+    if not chat_id or not isinstance(chat_id, str) or not chat_id.strip():
+        raise ValueError("chat_id cannot be empty")
+    
+    try:
+        from db_service import delete_conversation
+        return delete_conversation(chat_id)
+    except ValueError:
+        # Re-raise ValueError as-is
+        raise
+    except Exception as e:
+        # Re-raise with context for debugging
+        raise Exception(f"Failed to delete chat: {e}") from e
+

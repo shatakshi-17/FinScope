@@ -27,3 +27,4 @@ Thumbs.db
 # Test files
 data/test_files/
 
+node_modules/

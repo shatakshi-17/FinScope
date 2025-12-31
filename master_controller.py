@@ -12,6 +12,8 @@ import tempfile
 from typing import List, Dict, Optional
 from datetime import datetime
 from pathlib import Path
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 
 # Import all services
 try:
@@ -28,6 +30,519 @@ except ImportError as e:
 
 # Constants
 INACTIVITY_TIMEOUT = 3600  # 1 hour in seconds
+
+# Initialize Flask app for API endpoints
+app = Flask(__name__)
+
+# Enable CORS for Flask app
+# Note: Routes don't have /api prefix since Flask is mounted at /api in FastAPI
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+
+# Health check endpoint (fallback if FastAPI route doesn't work)
+@app.route('/health', methods=['GET'])
+def health_check_flask():
+    """Health check endpoint"""
+    return jsonify({"status": "online"})
+
+
+# API Endpoints for SEC Workflow
+# Note: Routes don't include /api prefix because Flask app is mounted at /api in FastAPI
+@app.route('/search-company', methods=['GET'])
+def search_company_endpoint():
+    """
+    Search for companies by name or ticker.
+    
+    Query parameters:
+        query: Company name or ticker to search for
+    
+    Returns:
+        JSON list of dictionaries with 'company_name' and 'ticker' keys
+    """
+    query = request.args.get('query', '').strip()
+    
+    if not query:
+        return jsonify({'error': 'Query parameter is required'}), 400
+    
+    try:
+        # Call the existing search function in company_service
+        suggestions = company_service.get_suggestions(query, max_results=50)
+        
+        # Convert list of tuples to list of dictionaries
+        results = [
+            {
+                'company_name': company_name,
+                'ticker': ticker
+            }
+            for company_name, ticker in suggestions
+        ]
+        
+        return jsonify(results)
+    except Exception as e:
+        return jsonify({'error': f'Failed to search companies: {str(e)}'}), 500
+
+
+@app.route('/get-filings', methods=['GET'])
+def get_filings_endpoint():
+    """
+    Get available filings for a company by ticker.
+    
+    Query parameters:
+        ticker: Company ticker symbol
+    
+    Returns:
+        JSON list of dictionaries with 'form_type', 'filing_date', and 'accession_number' keys
+    """
+    ticker = request.args.get('ticker', '').strip()
+    
+    if not ticker:
+        return jsonify({'error': 'Ticker parameter is required'}), 400
+    
+    try:
+        # Get CIK from ticker using sec_service
+        cik = sec_service.get_company_cik(ticker)
+        
+        if not cik:
+            return jsonify({'error': f'Could not find CIK for ticker: {ticker}'}), 404
+        
+        # Call the filing retrieval function in sec_service
+        filings = sec_service.get_filings_list(cik, years=3)
+        
+        # The filings list already contains dictionaries with form_type, filing_date, and accession_number
+        # Return as-is (it's already in the correct format)
+        return jsonify(filings)
+    except Exception as e:
+        return jsonify({'error': f'Failed to retrieve filings: {str(e)}'}), 500
+
+
+# Vector Store Manager for RAG
+_vector_stores = {}  # session_id -> file_path mapping (we'll use file-based RAG for now)
+
+def _initialize_vector_store(session_id: str, file_path: str) -> None:
+    """
+    Initialize vector store for a session.
+    For now, we'll store the file path and use Gemini's file-based RAG.
+    In a production system, you'd use ChromaDB or FAISS here.
+    """
+    _vector_stores[session_id] = file_path
+    print(f"✓ Vector store initialized for session: {session_id}")
+
+
+def _get_vector_store(session_id: str) -> Optional[str]:
+    """Get the file path for a session's vector store"""
+    return _vector_stores.get(session_id)
+
+
+@app.route('/start-analysis', methods=['POST'])
+def start_analysis_endpoint():
+    """
+    Start SEC filing analysis workflow.
+    
+    Request body (JSON):
+        ticker: Company ticker symbol
+        companyName: Company name
+        filingId: SEC accession number (e.g., '0000320193-24-000001')
+    
+    Returns:
+        JSON with sessionId and status
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Request body must be JSON'}), 400
+        
+        ticker = data.get('ticker', '').strip()
+        company_name = data.get('companyName', '').strip()
+        filing_id = data.get('filingId', '').strip()  # This is the accession_number
+        
+        if not ticker or not company_name or not filing_id:
+            return jsonify({'error': 'Missing required fields: ticker, companyName, filingId'}), 400
+        
+        # Step 1: Get CIK from ticker
+        cik = sec_service.get_company_cik(ticker)
+        if not cik:
+            return jsonify({'error': f'Could not find CIK for ticker: {ticker}'}), 404
+        
+        # Step 2: Download/Extract text from SEC filing
+        print(f"Downloading filing: {filing_id}")
+        file_path = sec_service.download_filing_as_text(filing_id, cik=cik)
+        if not file_path:
+            return jsonify({'error': f'Failed to download filing: {filing_id}'}), 500
+        
+        # Step 3: Initialize vector store (store file path for RAG)
+        session_id = None
+        try:
+            # Step 4: Generate executive summary (150 words)
+            print(f"Generating executive summary...")
+            summary = gemini_service.generate_file_summary(
+                file_path,
+                company_name=company_name,
+                doc_type='SEC Filing'
+            )
+            # Ensure exactly 150 words (truncate if longer, pad if shorter)
+            summary_words = summary.split()
+            if len(summary_words) > 150:
+                summary_words = summary_words[:150]
+            executive_summary = ' '.join(summary_words)
+            
+            # Step 5: Fetch latest 6 news headlines
+            print(f"Fetching news articles...")
+            news_articles = news_service.get_company_intelligence(company_name)
+            top_6_news = news_articles[:6] if len(news_articles) > 6 else news_articles
+            
+            # Step 6: Get filing date and form type from filings list (more accurate)
+            filing_date = 'Unknown'
+            form_type = 'SEC Filing'
+            try:
+                filings = sec_service.get_filings_list(cik, years=3)
+                for filing in filings:
+                    if filing.get('accession_number') == filing_id:
+                        filing_date = filing.get('filing_date', 'Unknown')
+                        form_type = filing.get('form_type', 'SEC Filing')
+                        break
+            except:
+                pass
+            
+            # Step 7: Create conversation in MongoDB
+            metadata = {
+                'company': company_name,
+                'ticker': ticker,
+                'cik': cik,
+                'filing_date': filing_date,
+                'doc_type': form_type,
+                'accession_number': filing_id,
+                'executive_summary': executive_summary,
+                'news_articles': top_6_news
+            }
+            
+            session_id = db_service.create_conversation('SEC', metadata)
+            
+            # Step 8: Initialize vector store for this session
+            _initialize_vector_store(session_id, file_path)
+            
+            # Step 9: Create active session with file path
+            db_service.create_active_session(session_id, [file_path])
+            
+            return jsonify({
+                'sessionId': session_id,
+                'status': 'success',
+                'executiveSummary': executive_summary,
+                'newsArticles': top_6_news,
+                'newsCount': len(top_6_news)
+            }), 200
+            
+        except Exception as e:
+            # Cleanup on error
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except:
+                    pass
+            raise e
+            
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': f'Failed to start analysis: {str(e)}'}), 500
+
+
+@app.route('/upload-analysis', methods=['POST'])
+def upload_analysis_endpoint():
+    """
+    Start local file upload analysis workflow.
+    
+    Request body (multipart/form-data):
+        file: The uploaded file (PDF or TXT)
+        companyName: Company name
+        docTitle: Document title
+        docType: Document type (10-K, 10-Q, 8-K, Internal Report, Other)
+        year: Year of the document
+    
+    Returns:
+        JSON with sessionId, executiveSummary, and newsArticles
+    """
+    try:
+        # Check if file is present
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        
+        # Get metadata from form
+        company_name = request.form.get('companyName', '').strip()
+        doc_title = request.form.get('docTitle', '').strip()
+        doc_type = request.form.get('docType', '').strip()
+        year_str = request.form.get('year', '').strip()
+        
+        if not company_name:
+            return jsonify({'error': 'Missing required field: companyName'}), 400
+        
+        # Validate and parse year
+        try:
+            year = int(year_str) if year_str else datetime.now().year
+        except ValueError:
+            year = datetime.now().year
+        
+        # Validate file extension
+        filename = file.filename
+        file_ext = Path(filename).suffix.lower()
+        if file_ext not in ['.txt', '.pdf']:
+            return jsonify({'error': f'Unsupported file type: {file_ext}. Only .txt and .pdf are supported.'}), 400
+        
+        # Save file to temporary directory
+        temp_file = tempfile.NamedTemporaryFile(mode='wb', suffix=file_ext, delete=False)
+        file.save(temp_file.name)
+        temp_file.close()
+        file_path = temp_file.name
+        
+        print(f"Saved uploaded file to: {file_path}")
+        
+        session_id = None
+        try:
+            # Extract text from file
+            print(f"Extracting text from {file_ext} file...")
+            if file_ext == '.txt':
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    text_content = f.read()
+                processed_content = upload_service.process_txt_file_content(text_content)
+                # Create a temp file with processed content for Gemini
+                temp_processed = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8')
+                temp_processed.write(processed_content)
+                temp_processed.close()
+                processed_path = temp_processed.name
+            elif file_ext == '.pdf':
+                processed_content = upload_service.process_pdf_file(file_path)
+                # Clean up messy tables
+                processed_content = upload_service.clean_markdown_table(processed_content)
+                # Create a temp file with processed content for Gemini (PDFs become Markdown)
+                temp_processed = tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False, encoding='utf-8')
+                temp_processed.write(processed_content)
+                temp_processed.close()
+                processed_path = temp_processed.name
+            
+            # Generate executive summary (150 words)
+            print(f"Generating executive summary...")
+            summary = gemini_service.generate_file_summary(
+                processed_path,
+                company_name=company_name,
+                doc_type=doc_type or 'Local Upload'
+            )
+            # Ensure exactly 150 words (truncate if longer, pad if shorter)
+            summary_words = summary.split()
+            if len(summary_words) > 150:
+                summary_words = summary_words[:150]
+            executive_summary = ' '.join(summary_words)
+            
+            # Fetch latest 6 news headlines
+            print(f"Fetching news articles...")
+            news_articles = news_service.get_company_intelligence(company_name)
+            top_6_news = news_articles[:6] if len(news_articles) > 6 else news_articles
+            
+            # Create conversation in MongoDB with source: 'local_upload'
+            # Required fields for UPLOAD workflow: company, year, doc_type, original_filename
+            metadata = {
+                'company': company_name,
+                'year': year,
+                'doc_type': doc_type or 'Local Upload',
+                'original_filename': filename,
+                'doc_title': doc_title,  # Optional field
+                'executive_summary': executive_summary,
+                'news_articles': top_6_news,
+                'source': 'local_upload',
+                'raw_file_path': file_path  # Save raw file path for View Source button
+            }
+            
+            session_id = db_service.create_conversation('UPLOAD', metadata)
+            
+            # Initialize vector store for this session (use processed path for RAG)
+            _initialize_vector_store(session_id, processed_path)
+            
+            # Create active session with both raw and processed file paths
+            db_service.create_active_session(session_id, [file_path, processed_path])
+            
+            return jsonify({
+                'sessionId': session_id,
+                'status': 'success',
+                'executiveSummary': executive_summary,
+                'newsArticles': top_6_news,
+                'newsCount': len(top_6_news)
+            }), 200
+            
+        except Exception as e:
+            # Cleanup on error
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except:
+                    pass
+            if 'processed_path' in locals() and processed_path and os.path.exists(processed_path):
+                try:
+                    os.remove(processed_path)
+                except:
+                    pass
+            raise e
+            
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': f'Failed to process upload: {str(e)}'}), 500
+
+
+@app.route('/chat', methods=['POST'])
+def chat_endpoint():
+    """
+    Chat endpoint with RAG (Retrieval Augmented Generation).
+    
+    Request body (JSON):
+        sessionId: The session ID from /start-analysis
+        userMessage: User's question/message
+    
+    Returns:
+        JSON with assistantResponse and references
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Request body must be JSON'}), 400
+        
+        session_id = data.get('sessionId', '').strip()
+        user_message = data.get('userMessage', '').strip()
+        
+        if not session_id or not user_message:
+            return jsonify({'error': 'Missing required fields: sessionId, userMessage'}), 400
+        
+        # Step 1: Retrieve vector store context (file path) for this session
+        file_path = _get_vector_store(session_id)
+        if not file_path or not os.path.exists(file_path):
+            return jsonify({'error': f'Vector store not found for session: {session_id}'}), 404
+        
+        # Step 2: Query Gemini using RAG (Context + User Question)
+        print(f"Processing chat query for session: {session_id}")
+        answer, references, chat_history = gemini_service.get_gemini_response(
+            user_message,
+            [file_path],  # Pass file path for RAG
+            chat_history=None  # Could retrieve from MongoDB if needed
+        )
+        
+        # Step 3: Save user message and assistant response to MongoDB
+        try:
+            db_service.add_message_to_conversation(session_id, 'user', user_message)
+        except Exception as e:
+            print(f"Warning: Failed to save user message to conversation {session_id}: {str(e)}")
+            # Continue anyway - don't block the chat response
+        
+        # Combine answer and references for storage
+        if references:
+            combined_content = f"{answer}\n\n--- References ---\n{references}"
+        else:
+            combined_content = answer
+        
+        try:
+            db_service.add_message_to_conversation(session_id, 'assistant', combined_content)
+        except Exception as e:
+            print(f"Warning: Failed to save assistant message to conversation {session_id}: {str(e)}")
+            # Continue anyway - don't block the chat response
+        
+        # Step 4: Return response
+        return jsonify({
+            'assistantResponse': answer,
+            'references': references or '',
+            'sessionId': session_id
+        }), 200
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': f'Failed to process chat: {str(e)}'}), 500
+
+
+@app.route('/end-session', methods=['POST'])
+def end_session_endpoint():
+    """
+    End a chat session and clean up resources.
+    
+    Request body (JSON):
+        sessionId: The session ID to end
+    
+    Returns:
+        JSON with success status
+    """
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Request body must be JSON'}), 400
+        
+        session_id = data.get('sessionId', '').strip()
+        
+        if not session_id:
+            return jsonify({'error': 'Missing required field: sessionId'}), 400
+        
+        # Step 1: Retrieve the conversation document from MongoDB
+        db = db_service.get_database()
+        conversations_collection = db[db_service.CONVERSATIONS_COLLECTION]
+        
+        from bson import ObjectId
+        from bson.errors import InvalidId
+        
+        # Validate session_id format
+        try:
+            object_id = ObjectId(session_id)
+        except InvalidId:
+            return jsonify({'error': f'Invalid sessionId format: {session_id}'}), 400
+        
+        # Retrieve conversation document
+        conversation = conversations_collection.find_one({"_id": object_id})
+        
+        if not conversation:
+            return jsonify({'error': f'Session not found: {session_id}'}), 404
+        
+        # Step 2: Retrieve raw_file_path from metadata (for upload workflows)
+        metadata = conversation.get('metadata', {})
+        raw_file_path = metadata.get('raw_file_path')
+        
+        # Step 3: Delete the uploaded file if raw_file_path exists
+        if raw_file_path:
+            try:
+                if os.path.exists(raw_file_path):
+                    os.remove(raw_file_path)
+                    print(f"✓ Deleted uploaded file: {raw_file_path}")
+                else:
+                    print(f"⚠ Uploaded file not found (already deleted?): {raw_file_path}")
+            except Exception as e:
+                print(f"✗ Failed to delete uploaded file {raw_file_path}: {e}")
+                # Continue with session cleanup even if file deletion fails
+        
+        # Step 4: End the chat session (this handles cleanup of temp files, archiving, etc.)
+        db_service.end_chat_session(session_id)
+        
+        # Step 5: Update MongoDB document to mark session as 'archived' (already done by end_chat_session, but ensure it's marked)
+        # The end_chat_session function already sets is_active = False, which effectively archives it
+        # We can add an explicit 'status' field if needed
+        conversations_collection.update_one(
+            {"_id": object_id},
+            {
+                "$set": {
+                    "status": "archived",
+                    "archived_at": datetime.utcnow()
+                }
+            }
+        )
+        
+        # Also remove from vector stores if present
+        if session_id in _vector_stores:
+            del _vector_stores[session_id]
+        
+        return jsonify({
+            'success': True,
+            'message': 'Session ended successfully'
+        }), 200
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': f'Failed to end session: {str(e)}'}), 500
 
 
 def print_step(step_num: int, message: str, status: str = "info"):
@@ -785,4 +1300,21 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    
+    # Check if user wants to run Flask API server
+    if len(sys.argv) > 1 and sys.argv[1] == '--api':
+        print("="*80)
+        print("FinScope Master Controller - API Server")
+        print("="*80)
+        print("\nStarting Flask API server on http://0.0.0.0:5001")
+        print("Available endpoints:")
+        print("  GET /api/search-company?query=...")
+        print("  GET /api/get-filings?ticker=...")
+        print("\nPress Ctrl+C to stop the server")
+        print("="*80 + "\n")
+        app.run(host='0.0.0.0', port=5001, debug=True)
+    else:
+        # Run the CLI interface
+        main()
+

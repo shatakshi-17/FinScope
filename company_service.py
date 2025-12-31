@@ -11,6 +11,7 @@ import pandas as pd
 import requests
 from typing import List, Optional, Tuple
 from rapidfuzz import fuzz, process
+from io import StringIO
 
 
 # Global variable to store the company list and name-to-ticker mapping
@@ -48,7 +49,7 @@ def fetch_company_lists() -> List[str]:
         }
         response = requests.get(sp500_url, headers=headers)
         response.raise_for_status()
-        sp500_tables = pd.read_html(response.text)
+        sp500_tables = pd.read_html(StringIO(response.text))
         sp500_df = sp500_tables[0]  # First table contains the company list
         
         # Verify we got the right columns
@@ -98,7 +99,7 @@ def fetch_company_lists() -> List[str]:
         }
         response = requests.get(nasdaq_url, headers=headers)
         response.raise_for_status()
-        nasdaq_tables = pd.read_html(response.text)
+        nasdaq_tables = pd.read_html(StringIO(response.text))
         
         # Try to find the right table - it usually has 'Company' or 'Ticker' column
         nasdaq_df = None

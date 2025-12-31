@@ -213,11 +213,19 @@ def add_message_to_conversation(chat_id: str, role: str, content: str) -> None:
         chat_id: The conversation ID
         role: Either 'user' or 'assistant'
         content: The message content
+    
+    Raises:
+        ValueError: If chat_id is invalid or conversation not found
     """
     db = get_database()
     collection = db[CONVERSATIONS_COLLECTION]
     
     from bson import ObjectId
+    
+    try:
+        object_id = ObjectId(chat_id)
+    except Exception as e:
+        raise ValueError(f"Invalid chat_id format: {chat_id}. Error: {str(e)}")
     
     message = {
         "role": role,
@@ -225,13 +233,21 @@ def add_message_to_conversation(chat_id: str, role: str, content: str) -> None:
         "timestamp": datetime.utcnow()
     }
     
-    collection.update_one(
-        {"_id": ObjectId(chat_id)},
+    result = collection.update_one(
+        {"_id": object_id},
         {
             "$push": {"messages": message},
             "$set": {"updated_at": datetime.utcnow()}
         }
     )
+    
+    if result.matched_count == 0:
+        raise ValueError(f"Conversation not found for chat_id: {chat_id}")
+    
+    if result.modified_count == 0:
+        print(f"Warning: Message not added to conversation {chat_id} (conversation may not exist or message already present)")
+    
+    print(f"✓ Added {role} message to conversation: {chat_id}")
 
 
 def add_file_to_session(chat_id: str, file_path: str) -> None:
@@ -337,6 +353,64 @@ def get_conversation(chat_id: str) -> Optional[Dict]:
         conversation["_id"] = str(conversation["_id"])
     
     return conversation
+
+
+def delete_conversation(chat_id: str) -> bool:
+    """
+    Permanently deletes a conversation from the database.
+    Also cleans up any associated active session if it exists.
+    
+    Args:
+        chat_id: The conversation ID to delete
+    
+    Returns:
+        bool: True if conversation was deleted, False if not found
+    
+    Raises:
+        ValueError: If chat_id format is invalid
+    """
+    db = get_database()
+    conversations_collection = db[CONVERSATIONS_COLLECTION]
+    sessions_collection = db[ACTIVE_SESSIONS_COLLECTION]
+    
+    from bson import ObjectId
+    from bson.errors import InvalidId
+    
+    # Validate chat_id format
+    try:
+        object_id = ObjectId(chat_id.strip())
+    except InvalidId:
+        raise ValueError(f"Invalid chat_id format: {chat_id}")
+    
+    # Check if conversation exists
+    conversation = conversations_collection.find_one({"_id": object_id})
+    if not conversation:
+        return False
+    
+    # If conversation has an active session, clean up temp files first
+    session = sessions_collection.find_one({"chat_id": chat_id})
+    if session:
+        temp_file_paths = session.get("temp_file_paths", [])
+        for file_path in temp_file_paths:
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    print(f"✓ Deleted file: {file_path}")
+            except Exception as e:
+                print(f"⚠ Failed to delete file {file_path}: {e}")
+        
+        # Delete the active session
+        sessions_collection.delete_one({"chat_id": chat_id})
+        print(f"✓ Removed active session: {chat_id}")
+    
+    # Delete the conversation
+    result = conversations_collection.delete_one({"_id": object_id})
+    
+    if result.deleted_count > 0:
+        print(f"✓ Deleted conversation: {chat_id}")
+        return True
+    else:
+        return False
 
 
 if __name__ == "__main__":

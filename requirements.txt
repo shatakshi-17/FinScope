@@ -6,6 +6,10 @@
 # ------------------------------------------------------------------------------
 python-dotenv>=1.0.0          # Environment variable management (.env files)
 requests>=2.31.0              # HTTP client for API calls and web scraping
+fastapi>=0.104.0              # FastAPI web framework for REST API
+uvicorn[standard]>=0.24.0     # ASGI server for running FastAPI
+flask>=3.0.0                  # Flask web framework for Master Controller API endpoints
+flask-cors>=4.0.0             # CORS support for Flask app
 
 # Database
 # ------------------------------------------------------------------------------
@@ -16,6 +20,7 @@ pymongo>=4.6.0                 # MongoDB driver for database operations
 # ------------------------------------------------------------------------------
 google-generativeai>=0.3.0     # Google Gemini API client for document analysis
 tenacity>=8.2.0                # Retry logic with exponential backoff for API calls
+chromadb>=0.4.0                # Vector database for RAG (Retrieval Augmented Generation)
 
 # Data Processing & Analysis
 # ------------------------------------------------------------------------------
