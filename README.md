@@ -1,7 +1,5 @@
 # FinScope - AI-Powered Financial Intelligence
 
-<div align="center">
-
 **Unified Investor Intelligence Platform**
 
 *Transform financial documents into actionable insights with AI-powered analysis*
